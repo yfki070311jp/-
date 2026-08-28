@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, time, date, timedelta, timezone
 
-# --- 2. タイムゾーンの設定（常に日本時間にする） ---
+# タイムゾーンの設定（常に日本時間にする）
 JST = timezone(timedelta(hours=+9), 'JST')
 
 DATA_DIR = "data"
@@ -15,7 +15,7 @@ SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 安全に数値変換するヘルパー関数（1. 型変換エラー対策）
+# 安全に数値変換するヘルパー関数（バグ1対策）
 def safe_int(val, default=0):
     try:
         num = pd.to_numeric(val, errors='coerce')
@@ -51,6 +51,8 @@ if 'inventory' not in st.session_state:
     if os.path.exists(INVENTORY_FILE):
         try:
             st.session_state.inventory = pd.read_csv(INVENTORY_FILE, encoding="utf-8-sig")
+            st.session_state.inventory['価格'] = st.session_state.inventory['価格'].apply(lambda x: safe_int(x, 0))
+            st.session_state.inventory['在庫数'] = st.session_state.inventory['在庫数'].apply(lambda x: safe_int(x, 0))
         except Exception:
             st.session_state.inventory = default_inventory.copy()
     else:
@@ -148,13 +150,14 @@ def is_peak_time(dt_slot):
     current_minutes = dt_slot.hour * 60 + dt_slot.minute
     return (11 * 60) <= current_minutes < (13 * 60)
 
-# 2. 常に日本時間で現在時刻を取得
 now = datetime.now(JST).replace(tzinfo=None)
 
 elapsed_sales = {}
 if not st.session_state.history.empty:
     hist_df = st.session_state.history.copy()
+    # バグ2対策: 日時を安全にパースし不正データをドロップ
     hist_df['dt'] = pd.to_datetime(hist_df['日時'], errors='coerce')
+    hist_df = hist_df.dropna(subset=['dt'])
     target_end = min(e_dt, now)
     target_hist = hist_df[(hist_df['dt'] >= s_dt) & (hist_df['dt'] <= target_end)]
     if not target_hist.empty:
@@ -164,8 +167,7 @@ total_minutes = max(1, int((e_dt - s_dt).total_seconds() / 60))
 elapsed_weight = 0.0
 total_weight = 0.0
 
-# --- 6. 無限ループ防止処理 ---
-if total_minutes > 60 * 24 * 3:  # 設定が3日以上の場合
+if total_minutes > 60 * 24 * 3:
     st.sidebar.error("⚠️ 営業期間が長すぎます（最大3日まで）。予測計算を簡易モードに切り替えます。")
     total_weight = float(total_minutes)
     if now > s_dt:
@@ -220,14 +222,15 @@ with tab1:
         else:
             c1.write(f"**{p_name}** (¥{p_price} / 在庫:{p_stock})")
 
-        if c2.button("－", key=f"sub_{index}", disabled=not is_admin):
+        # バグ3対策: ボタンのキーにインデックスではなく商品名（p_name）を使用
+        if c2.button("－", key=f"sub_{p_name}", disabled=not is_admin):
             if st.session_state.temp_cart.get(p_name, 0) > 0:
                 st.session_state.temp_cart[p_name] -= 1
                 st.rerun()
 
         c3.write(f"### {st.session_state.temp_cart.get(p_name, 0)}")
 
-        if c4.button("＋", key=f"add_{index}", disabled=(p_stock <= 0 or not is_admin)):
+        if c4.button("＋", key=f"add_{p_name}", disabled=(p_stock <= 0 or not is_admin)):
             if st.session_state.temp_cart.get(p_name, 0) < p_stock:
                 st.session_state.temp_cart[p_name] += 1
                 st.rerun()
@@ -243,7 +246,6 @@ with tab1:
 
     st.info(f"合計金額: **¥{total_price}**")
     
-    # 日本時間で記録
     now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
 
     col_btn1, col_btn2, col_btn3 = st.columns(3)
@@ -292,7 +294,6 @@ with tab1:
 with tab2:
     st.header("在庫管理")
     if is_admin:
-        # 1. column_config で数値入力のみに制限
         edited_inventory = st.data_editor(
             st.session_state.inventory,
             use_container_width=True,
@@ -304,13 +305,16 @@ with tab2:
             }
         )
         if not edited_inventory.equals(st.session_state.inventory):
+            # バグ1対策: 編集直後に確実に整数型へ変換して保持
+            edited_inventory['価格'] = edited_inventory['価格'].apply(lambda x: safe_int(x, 0))
+            edited_inventory['在庫数'] = edited_inventory['在庫数'].apply(lambda x: safe_int(x, 0))
             st.session_state.inventory = edited_inventory
             save_data()
             st.rerun()
     else:
         st.dataframe(st.session_state.inventory, use_container_width=True)
 
-# --- タブ3以降（販売履歴・予測・価格提案）は大きなロジック変更なし（安全な型変換のみ適用） ---
+# --- Tab 3: 販売履歴 ---
 with tab3:
     st.header("販売履歴")
     if not st.session_state.history.empty:
@@ -333,6 +337,7 @@ with tab3:
     else:
         st.write("履歴はありません。")
 
+# --- Tab 4: 整理券確認 ---
 with tab4:
     st.header("整理券確認・受け渡し管理")
     if not st.session_state.history.empty:
@@ -350,6 +355,7 @@ with tab4:
                         st.rerun()
                     st.table(ticket_rows[['商品名', '数量', '合計金額']])
 
+# --- Tab 5: 販売予測 ---
 with tab5:
     st.header("販売予測 ＆ 予想在庫残数")
     res = []
@@ -371,6 +377,7 @@ with tab5:
         })
     if res: st.table(pd.DataFrame(res))
 
+# --- Tab 6: 価格提案 ---
 with tab6:
     st.header("価格提案")
     res = []
