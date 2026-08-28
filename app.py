@@ -1,4 +1,3 @@
-mkdir -p data && cat << 'EOF' > app.py
 # coding: utf-8
 import os
 import json
@@ -25,13 +24,6 @@ def save_data():
         json.dump(settings, f, ensure_ascii=False, indent=2)
     st.session_state.start_inventory.to_csv(os.path.join(DATA_DIR, "start_inventory.csv"), index=False, encoding="utf-8-sig")
 
-# 安全に数値変換するヘルパー
-def safe_int(val, default=0):
-    try:
-        return int(float(val))
-    except (ValueError, TypeError):
-        return default
-
 default_inventory = pd.DataFrame([
     {'商品名': 'チュロス（チョコ）', '価格': 200, '在庫数': 400},
     {'商品名': 'チュロス（シナモン）', '価格': 200, '在庫数': 200},
@@ -55,15 +47,17 @@ if 'inventory' not in st.session_state:
 if 'history' not in st.session_state:
     if os.path.exists(HISTORY_FILE):
         try:
-            # 整理券番号を常に文字列(str)として読み込むよう指定
-            st.session_state.history = pd.read_csv(HISTORY_FILE, encoding="utf-8-sig", dtype={'整理券番号': str})
-            st.session_state.history['整理券番号'] = st.session_state.history['整理券番号'].fillna("なし").astype(str)
-            
+            st.session_state.history = pd.read_csv(HISTORY_FILE, encoding="utf-8-sig")
             if '受け渡し済' in st.session_state.history.columns:
                 def parse_bool(val):
-                    if isinstance(val, bool): return val
-                    if pd.isna(val): return False
-                    return str(val).strip().lower() in ['true', '1', 'yes', 't', 'y']
+                    if isinstance(val, bool):
+                        return val
+                    if pd.isna(val):
+                        return False
+                    str_val = str(val).strip().lower()
+                    if str_val in ['true', '1', 'yes', 't', 'y']:
+                        return True
+                    return False
                 st.session_state.history['受け渡し済'] = st.session_state.history['受け渡し済'].apply(parse_bool)
             else:
                 st.session_state.history['受け渡し済'] = False
@@ -79,9 +73,9 @@ if 'master_prices' not in st.session_state:
                 settings = json.load(f)
             st.session_state.master_prices = {str(k): int(v) for k, v in settings.get("master_prices", {}).items()}
         except Exception:
-            st.session_state.master_prices = {row['商品名']: safe_int(row['価格']) for _, row in st.session_state.inventory.iterrows() if pd.notnull(row['商品名'])}
+            st.session_state.master_prices = {row['商品名']: int(row['価格']) for _, row in st.session_state.inventory.iterrows() if pd.notnull(row['商品名']) and pd.notnull(row['価格'])}
     else:
-        st.session_state.master_prices = {row['商品名']: safe_int(row['価格']) for _, row in st.session_state.inventory.iterrows() if pd.notnull(row['商品名'])}
+        st.session_state.master_prices = {row['商品名']: int(row['価格']) for _, row in st.session_state.inventory.iterrows() if pd.notnull(row['商品名']) and pd.notnull(row['価格'])}
 
 if 'start_inventory' not in st.session_state:
     start_file = os.path.join(DATA_DIR, "start_inventory.csv")
@@ -163,7 +157,9 @@ while curr < e_dt:
             elapsed_weight += weight * actual_minutes
     curr = next_minute
 
-if elapsed_weight <= 0: elapsed_weight = 0.1
+if elapsed_weight <= 0:
+    elapsed_weight = 0.1
+
 total_duration = (e_dt - s_dt).total_seconds()
 remaining_duration = (e_dt - now).total_seconds()
 time_progress = max(0.0, min(1.0, remaining_duration / total_duration)) if total_duration > 0 else 0.5
@@ -172,18 +168,20 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["レジ（会計）", "在庫管�
 
 with tab1:
     st.header("高速お会計（数量調整ボタン）")
-    inv = st.session_state.inventory[st.session_state.inventory['商品名'].astype(str).str.strip() != ""]
-    inv = inv.dropna(subset=['商品名'])
+    inv = st.session_state.inventory.dropna(subset=['商品名'])
     
     if 'temp_cart' not in st.session_state:
         st.session_state.temp_cart = {}
-    current_product_names = [str(name) for name in inv['商品名']]
+    current_product_names = [str(name) for name in inv['商品名'] if pd.notnull(name)]
     st.session_state.temp_cart = {name: st.session_state.temp_cart.get(name, 0) for name in current_product_names}
 
     for index, row in inv.iterrows():
-        p_name = str(row['商品名'])
-        p_price = safe_int(row['価格'])
-        p_stock = safe_int(row['在庫数'])
+        p_name = row['商品名']
+        if pd.isnull(p_name):
+            continue
+        p_name = str(p_name)
+        p_price = int(row['価格']) if pd.notnull(row['価格']) else 0
+        p_stock = int(row['在庫数']) if pd.notnull(row['在庫数']) else 0
 
         c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         if p_stock <= 0:
@@ -208,60 +206,78 @@ with tab1:
     for name, qty in st.session_state.temp_cart.items():
         if qty > 0 and name in inv['商品名'].values:
             match_row = inv[inv['商品名'] == name]
-            if not match_row.empty:
-                price = safe_int(match_row['価格'].iloc[0])
+            if not match_row.empty and pd.notnull(match_row['価格'].iloc[0]):
+                price = int(match_row['価格'].iloc[0])
                 total_price += price * qty
 
     st.info(f"合計金額: **¥{total_price}**")
     col_btn1, col_btn2, col_btn3 = st.columns(3)
 
-    def process_checkout(use_ticket):
-        has_item = any(q > 0 for q in st.session_state.temp_cart.values())
-        if not has_item:
-            st.error("商品が選択されていません。")
-            return
-        
-        insufficient = []
-        for name, qty in st.session_state.temp_cart.items():
-            if qty <= 0: continue
-            match = st.session_state.inventory[st.session_state.inventory['商品名'] == name]
-            if match.empty: continue
-            current_stock = safe_int(match['在庫数'].iloc[0])
-            if qty > current_stock:
-                insufficient.append(f"{name}（在庫{current_stock}個）")
-                
-        if insufficient:
-            st.error("在庫不足です：" + "、".join(insufficient))
-        else:
-            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            # 整理券番号を明確に文字列型(str)として保持
-            ticket_num = str(st.session_state.ticket_counter) if use_ticket else "なし"
-            is_delivered = not use_ticket
-            
-            for name, qty in st.session_state.temp_cart.items():
-                if qty > 0:
-                    idx = st.session_state.inventory.index[st.session_state.inventory['商品名'] == name][0]
-                    price = safe_int(st.session_state.inventory.at[idx, '価格'])
-                    curr_stock = safe_int(st.session_state.inventory.at[idx, '在庫数'])
-                    st.session_state.inventory.at[idx, '在庫数'] = curr_stock - qty
-                    new_hist = pd.DataFrame([{'日時': now_str, '商品名': name, '数量': qty, '合計金額': price * qty, '整理券番号': ticket_num, '受け渡し済': is_delivered}])
-                    st.session_state.history = pd.concat([st.session_state.history, new_hist], ignore_index=True)
-            
-            if use_ticket:
-                st.session_state.ticket_counter += 1
-                st.success(f"会計完了！整理券番号: **{ticket_num}**")
-            else:
-                st.success("会計完了！（整理券なし）")
-                
-            save_data()
-            st.session_state.temp_cart = {name: 0 for name in current_product_names}
-            st.rerun()
-
     with col_btn1:
-        if st.button("整理券なしで会計"): process_checkout(False)
+        if st.button("整理券なしで会計"):
+            has_item = any(q > 0 for q in st.session_state.temp_cart.values())
+            if not has_item:
+                st.error("商品が選択されていません。")
+            else:
+                insufficient = []
+                for name, qty in st.session_state.temp_cart.items():
+                    if qty <= 0:
+                        continue
+                    match = st.session_state.inventory[st.session_state.inventory['商品名'] == name]
+                    if match.empty:
+                        continue
+                    current_stock = int(match['在庫数'].iloc[0])
+                    if qty > current_stock:
+                        insufficient.append(f"{name}（在庫{current_stock}個）")
+                if insufficient:
+                    st.error("在庫不足です：" + "、".join(insufficient))
+                else:
+                    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    for name, qty in st.session_state.temp_cart.items():
+                        if qty > 0:
+                            idx = st.session_state.inventory.index[st.session_state.inventory['商品名'] == name][0]
+                            price = int(st.session_state.inventory.at[idx, '価格'])
+                            st.session_state.inventory.at[idx, '在庫数'] -= qty
+                            new_hist = pd.DataFrame([{'日時': now_str, '商品名': name, '数量': qty, '合計金額': price * qty, '整理券番号': "なし", '受け渡し済': True}])
+                            st.session_state.history = pd.concat([st.session_state.history, new_hist], ignore_index=True)
+                    save_data()
+                    st.success("会計完了！（整理券なし）")
+                    st.session_state.temp_cart = {name: 0 for name in current_product_names}
+                    st.rerun()
 
     with col_btn2:
-        if st.button("整理券を発行して会計"): process_checkout(True)
+        if st.button("整理券を発行して会計"):
+            has_item = any(q > 0 for q in st.session_state.temp_cart.values())
+            if not has_item:
+                st.error("商品が選択されていません。")
+            else:
+                insufficient = []
+                for name, qty in st.session_state.temp_cart.items():
+                    if qty <= 0:
+                        continue
+                    match = st.session_state.inventory[st.session_state.inventory['商品名'] == name]
+                    if match.empty:
+                        continue
+                    current_stock = int(match['在庫数'].iloc[0])
+                    if qty > current_stock:
+                        insufficient.append(f"{name}（在庫{current_stock}個）")
+                if insufficient:
+                    st.error("在庫不足です：" + "、".join(insufficient))
+                else:
+                    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    ticket_num = st.session_state.ticket_counter
+                    for name, qty in st.session_state.temp_cart.items():
+                        if qty > 0:
+                            idx = st.session_state.inventory.index[st.session_state.inventory['商品名'] == name][0]
+                            price = int(st.session_state.inventory.at[idx, '価格'])
+                            st.session_state.inventory.at[idx, '在庫数'] -= qty
+                            new_hist = pd.DataFrame([{'日時': now_str, '商品名': name, '数量': qty, '合計金額': price * qty, '整理券番号': ticket_num, '受け渡し済': False}])
+                            st.session_state.history = pd.concat([st.session_state.history, new_hist], ignore_index=True)
+                    st.session_state.ticket_counter += 1
+                    save_data()
+                    st.success(f"会計完了！整理券番号: **{ticket_num}**")
+                    st.session_state.temp_cart = {name: 0 for name in current_product_names}
+                    st.rerun()
 
     with col_btn3:
         if st.button("かごを空にする"):
@@ -279,20 +295,17 @@ with tab2:
         key="inventory_editor"
     )
 
-    def df_to_normalized_list(df):
-        return df.fillna("").astype(str).to_dict(orient='records')
-
-    if df_to_normalized_list(edited_inventory) != df_to_normalized_list(st.session_state.inventory):
-        st.session_state.inventory = edited_inventory.copy()
+    if not edited_inventory.equals(st.session_state.inventory):
+        st.session_state.inventory = edited_inventory
         save_data()
         st.rerun()
 
     for _, row in st.session_state.inventory.iterrows():
         p_name = row['商品名']
-        if pd.notnull(p_name) and str(p_name).strip() != "":
-            p_price = safe_int(row['価格'])
+        p_price = row['価格']
+        if pd.notnull(p_name) and pd.notnull(p_price):
             if p_name not in st.session_state.master_prices:
-                st.session_state.master_prices[p_name] = p_price
+                st.session_state.master_prices[p_name] = int(p_price)
                 save_data()
 
     st.divider()
@@ -316,17 +329,15 @@ with tab3:
         st.metric("総売上金額", f"¥{st.session_state.history['合計金額'].sum()}")
         for i, row in st.session_state.history.iloc[::-1].iterrows():
             c1, c2 = st.columns([4, 1])
-            t_num_str = str(row['整理券番号'])
-            t_label = f"券#{t_num_str}" if t_num_str != "なし" else "整理券なし"
+            t_label = f"券#{row['整理券番号']}" if row['整理券番号'] != "なし" else "整理券なし"
             status_label = " [受け渡し済]" if row.get('受け渡し済', False) else ""
             c1.write(f"{t_label}{status_label} | {row['日時']} | {row['商品名']} | {row['数量']}個 | ¥{row['合計金額']}")
             if c2.button("削除", key=f"del_{i}"):
                 p_name = row['商品名']
-                p_qty = safe_int(row['数量'])
+                p_qty = row['数量']
                 if p_name in st.session_state.inventory['商品名'].values:
                     idx = st.session_state.inventory.index[st.session_state.inventory['商品名'] == p_name][0]
-                    curr_stock = safe_int(st.session_state.inventory.at[idx, '在庫数'])
-                    st.session_state.inventory.at[idx, '在庫数'] = curr_stock + p_qty
+                    st.session_state.inventory.at[idx, '在庫数'] = int(st.session_state.inventory.at[idx, '在庫数']) + p_qty
                 st.session_state.history = st.session_state.history.drop(i).reset_index(drop=True)
                 save_data()
                 st.rerun()
@@ -336,12 +347,10 @@ with tab3:
 with tab4:
     st.header("整理券確認・受け渡し管理")
     if not st.session_state.history.empty:
-        valid_tickets = [str(t) for t in st.session_state.history['整理券番号'].unique() if str(t) != "なし"]
+        valid_tickets = [t for t in st.session_state.history['整理券番号'].unique() if t != "なし"]
         if valid_tickets:
-            # 数値順でソート（"10"が"2"より前に来ないようにint変換ソート）
-            sorted_tickets = sorted(valid_tickets, key=lambda x: int(x) if x.isdigit() else x, reverse=True)
-            for t_num in sorted_tickets:
-                ticket_rows = st.session_state.history[st.session_state.history['整理券番号'].astype(str) == t_num]
+            for t_num in sorted(valid_tickets, reverse=True):
+                ticket_rows = st.session_state.history[st.session_state.history['整理券番号'] == t_num]
                 is_all_delivered = all(ticket_rows['受け渡し済'])
                 expander_title = f"整理券番号: {t_num}" + (" ✅ 【受け渡し完了】" if is_all_delivered else " ⏳ 【未】")
                 with st.expander(expander_title):
@@ -360,12 +369,13 @@ with tab4:
 with tab5:
     st.header("販売予測 ＆ 予想在庫残数")
     res = []
-    valid_inv = st.session_state.inventory[st.session_state.inventory['商品名'].astype(str).str.strip() != ""]
-    for _, row in valid_inv.dropna(subset=['商品名']).iterrows():
-        p_name = str(row['商品名'])
-        current_stock = safe_int(row['在庫数'])
+    for _, row in inv.iterrows():
+        p_name = row['商品名']
+        if pd.isnull(p_name):
+            continue
+        current_stock = int(row['在庫数']) if pd.notnull(row['在庫数']) else 0
         start_val = st.session_state.start_inventory[st.session_state.start_inventory['商品名'] == p_name]['在庫数']
-        start_stock = safe_int(start_val.values[0]) if not start_val.empty else current_stock
+        start_stock = int(start_val.values[0]) if not start_val.empty and pd.notnull(start_val.values[0]) else current_stock
         sold = elapsed_sales.get(p_name, 0)
         expected_stock_by_sales = start_stock - sold
         manual_loss = max(0, expected_stock_by_sales - current_stock)
@@ -388,14 +398,14 @@ with tab6:
     st.header("価格提案（強気 vs 弱気）")
     st.write("・**強気提案価格 / 弱気提案価格**: どちらも最大5割引（元の価格の50%）を下限として制限しています。")
     res = []
-    valid_inv = st.session_state.inventory[st.session_state.inventory['商品名'].astype(str).str.strip() != ""]
-    for _, row in valid_inv.dropna(subset=['商品名']).iterrows():
-        p_name = str(row['商品名'])
-        price = safe_int(st.session_state.master_prices.get(p_name, row['価格']))
-        if price <= 0: continue
-        current_stock = safe_int(row['在庫数'])
+    for _, row in inv.iterrows():
+        p_name = row['商品名']
+        if pd.isnull(p_name) or pd.isnull(row['価格']):
+            continue
+        price = st.session_state.master_prices.get(p_name, int(row['価格']))
+        current_stock = int(row['在庫数']) if pd.notnull(row['在庫数']) else 0
         start_val = st.session_state.start_inventory[st.session_state.start_inventory['商品名'] == p_name]['在庫数']
-        start_stock = safe_int(start_val.values[0]) if not start_val.empty else current_stock
+        start_stock = int(start_val.values[0]) if not start_val.empty and pd.notnull(start_val.values[0]) else current_stock
         sold = elapsed_sales.get(p_name, 0)
         expected_stock_by_sales = start_stock - sold
         manual_loss = max(0, expected_stock_by_sales - current_stock)
@@ -404,7 +414,6 @@ with tab6:
         weak_price = "-"
         future_sales_est = int((sold / elapsed_weight) * (total_weight - elapsed_weight))
         expected_remaining = max(0, current_stock - future_sales_est)
-        
         if expected_remaining > 0 and (sold > 0 or manual_loss > 0):
             status = "要値下げ"
             surplus_ratio = expected_remaining / start_stock if start_stock > 0 else 0
@@ -430,5 +439,3 @@ with tab6:
         st.table(pd.DataFrame(res))
     else:
         st.write("有効な商品データがありません。")
-EOF
-python3 -m streamlit run app.py
