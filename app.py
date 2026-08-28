@@ -15,7 +15,7 @@ SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 安全に数値変換するヘルパー関数（バグ1対策）
+# 安全に数値変換するヘルパー関数
 def safe_int(val, default=0):
     try:
         num = pd.to_numeric(val, errors='coerce')
@@ -62,6 +62,12 @@ if 'history' not in st.session_state:
     if os.path.exists(HISTORY_FILE):
         try:
             st.session_state.history = pd.read_csv(HISTORY_FILE, encoding="utf-8-sig")
+            # 数量カラムの型安全確保
+            if '数量' in st.session_state.history.columns:
+                st.session_state.history['数量'] = st.session_state.history['数量'].apply(lambda x: safe_int(x, 0))
+            else:
+                st.session_state.history['数量'] = 0
+
             if '受け渡し済' in st.session_state.history.columns:
                 def parse_bool(val):
                     if isinstance(val, bool): return val
@@ -75,6 +81,10 @@ if 'history' not in st.session_state:
             st.session_state.history = default_history.copy()
     else:
         st.session_state.history = default_history.copy()
+else:
+    # セッション内に既に存在する場合も数量の安全性を担保
+    if '数量' in st.session_state.history.columns:
+        st.session_state.history['数量'] = st.session_state.history['数量'].apply(lambda x: safe_int(x, 0))
 
 if 'master_prices' not in st.session_state:
     if os.path.exists(SETTINGS_FILE):
@@ -155,9 +165,10 @@ now = datetime.now(JST).replace(tzinfo=None)
 elapsed_sales = {}
 if not st.session_state.history.empty:
     hist_df = st.session_state.history.copy()
-    # バグ2対策: 日時を安全にパースし不正データをドロップ
     hist_df['dt'] = pd.to_datetime(hist_df['日時'], errors='coerce')
     hist_df = hist_df.dropna(subset=['dt'])
+    # 数量を確実に数値化して集計
+    hist_df['数量'] = hist_df['数量'].apply(lambda x: safe_int(x, 0))
     target_end = min(e_dt, now)
     target_hist = hist_df[(hist_df['dt'] >= s_dt) & (hist_df['dt'] <= target_end)]
     if not target_hist.empty:
@@ -222,7 +233,6 @@ with tab1:
         else:
             c1.write(f"**{p_name}** (¥{p_price} / 在庫:{p_stock})")
 
-        # バグ3対策: ボタンのキーにインデックスではなく商品名（p_name）を使用
         if c2.button("－", key=f"sub_{p_name}", disabled=not is_admin):
             if st.session_state.temp_cart.get(p_name, 0) > 0:
                 st.session_state.temp_cart[p_name] -= 1
@@ -305,7 +315,6 @@ with tab2:
             }
         )
         if not edited_inventory.equals(st.session_state.inventory):
-            # バグ1対策: 編集直後に確実に整数型へ変換して保持
             edited_inventory['価格'] = edited_inventory['価格'].apply(lambda x: safe_int(x, 0))
             edited_inventory['在庫数'] = edited_inventory['在庫数'].apply(lambda x: safe_int(x, 0))
             st.session_state.inventory = edited_inventory
@@ -341,9 +350,18 @@ with tab3:
 with tab4:
     st.header("整理券確認・受け渡し管理")
     if not st.session_state.history.empty:
-        valid_tickets = [t for t in st.session_state.history['整理券番号'].unique() if t != "なし"]
+        valid_tickets = [t for t in st.session_state.history['整理券番号'].unique() if str(t) != "なし"]
         if valid_tickets:
-            for t_num in sorted(valid_tickets, reverse=True):
+            # 型混在や辞書順ソートの問題を防ぐため、安全に数値としてソート（失敗時は文字列として安全に処理）
+            def safe_sort_key(val):
+                try:
+                    return (0, int(val))
+                except (ValueError, TypeError):
+                    return (1, str(val))
+
+            sorted_tickets = sorted(valid_tickets, key=safe_sort_key, reverse=True)
+
+            for t_num in sorted_tickets:
                 ticket_rows = st.session_state.history[st.session_state.history['整理券番号'] == t_num]
                 is_all_delivered = all(ticket_rows['受け渡し済'])
                 expander_title = f"整理券番号: {t_num}" + (" ✅ 【完了】" if is_all_delivered else " ⏳ 【未】")
@@ -364,7 +382,7 @@ with tab5:
         current_stock = safe_int(row['在庫数'])
         start_val = st.session_state.start_inventory[st.session_state.start_inventory['商品名'] == p_name]['在庫数']
         start_stock = safe_int(start_val.values[0]) if not start_val.empty else current_stock
-        sold = elapsed_sales.get(p_name, 0)
+        sold = safe_int(elapsed_sales.get(p_name, 0))
         manual_loss = max(0, (start_stock - sold) - current_stock)
         est_total = int((sold / elapsed_weight) * total_weight) + manual_loss
         expected_remaining = max(0, current_stock - int((sold / elapsed_weight) * (total_weight - elapsed_weight)))
@@ -387,7 +405,7 @@ with tab6:
         current_stock = safe_int(row['在庫数'])
         start_val = st.session_state.start_inventory[st.session_state.start_inventory['商品名'] == p_name]['在庫数']
         start_stock = safe_int(start_val.values[0]) if not start_val.empty else current_stock
-        sold = elapsed_sales.get(p_name, 0)
+        sold = safe_int(elapsed_sales.get(p_name, 0))
         future_sales_est = int((sold / elapsed_weight) * (total_weight - elapsed_weight))
         expected_remaining = max(0, current_stock - future_sales_est)
         
