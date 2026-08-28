@@ -111,6 +111,17 @@ if 'ticket_counter' not in st.session_state:
 
 st.title("簡易レジ＆在庫管理アプリ")
 
+# --- モード切替（権限設定） ---
+st.sidebar.header("🔐 モード切替")
+passcode = st.sidebar.text_input("管理者パスワード（編集用）", type="password")
+ADMIN_PASSWORD = "1234"  # 好きなパスワードに変更可能
+
+is_admin = (passcode == ADMIN_PASSWORD)
+if is_admin:
+    st.sidebar.success("🟢 編集モード（PC操作中）")
+else:
+    st.sidebar.warning("🔒 閲覧専用モード")
+
 st.sidebar.header("🕒 営業日時の設定")
 today = date.today()
 start_date_input = st.sidebar.date_input("開始日", value=today, key="s_date")
@@ -168,6 +179,8 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["レジ（会計）", "在庫管�
 
 with tab1:
     st.header("高速お会計（数量調整ボタン）")
+    if not is_admin:
+        st.info("💡 閲覧モード中のため、レジ操作は無効化されています。")
     inv = st.session_state.inventory.dropna(subset=['商品名'])
     
     if 'temp_cart' not in st.session_state:
@@ -189,14 +202,14 @@ with tab1:
         else:
             c1.write(f"**{p_name}** (¥{p_price} / 在庫:{p_stock})")
 
-        if c2.button("－", key=f"sub_{index}"):
+        if c2.button("－", key=f"sub_{index}", disabled=not is_admin):
             if st.session_state.temp_cart.get(p_name, 0) > 0:
                 st.session_state.temp_cart[p_name] -= 1
                 st.rerun()
 
         c3.write(f"### {st.session_state.temp_cart.get(p_name, 0)}")
 
-        if c4.button("＋", key=f"add_{index}", disabled=(p_stock <= 0)):
+        if c4.button("＋", key=f"add_{index}", disabled=(p_stock <= 0 or not is_admin)):
             if st.session_state.temp_cart.get(p_name, 0) < p_stock:
                 st.session_state.temp_cart[p_name] += 1
                 st.rerun()
@@ -214,7 +227,7 @@ with tab1:
     col_btn1, col_btn2, col_btn3 = st.columns(3)
 
     with col_btn1:
-        if st.button("整理券なしで会計"):
+        if st.button("整理券なしで会計", disabled=not is_admin):
             has_item = any(q > 0 for q in st.session_state.temp_cart.values())
             if not has_item:
                 st.error("商品が選択されていません。")
@@ -246,7 +259,7 @@ with tab1:
                     st.rerun()
 
     with col_btn2:
-        if st.button("整理券を発行して会計"):
+        if st.button("整理券を発行して会計", disabled=not is_admin):
             has_item = any(q > 0 for q in st.session_state.temp_cart.values())
             if not has_item:
                 st.error("商品が選択されていません。")
@@ -280,25 +293,27 @@ with tab1:
                     st.rerun()
 
     with col_btn3:
-        if st.button("かごを空にする"):
+        if st.button("かごを空にする", disabled=not is_admin):
             st.session_state.temp_cart = {name: 0 for name in current_product_names}
             st.rerun()
 
 with tab2:
     st.header("在庫管理")
-    st.write("・表の内容（商品名、価格、在庫数）を変更すると自動で保存されます。行の追加・削除も可能です。")
-    
-    edited_inventory = st.data_editor(
-        st.session_state.inventory,
-        use_container_width=True,
-        num_rows="dynamic",
-        key="inventory_editor"
-    )
-
-    if not edited_inventory.equals(st.session_state.inventory):
-        st.session_state.inventory = edited_inventory
-        save_data()
-        st.rerun()
+    if is_admin:
+        st.write("・表の内容（商品名、価格、在庫数）を変更すると自動で保存されます。")
+        edited_inventory = st.data_editor(
+            st.session_state.inventory,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="inventory_editor"
+        )
+        if not edited_inventory.equals(st.session_state.inventory):
+            st.session_state.inventory = edited_inventory
+            save_data()
+            st.rerun()
+    else:
+        st.write("・現在の在庫状況です（閲覧専用）。")
+        st.dataframe(st.session_state.inventory, use_container_width=True)
 
     for _, row in st.session_state.inventory.iterrows():
         p_name = row['商品名']
@@ -306,25 +321,27 @@ with tab2:
         if pd.notnull(p_name) and pd.notnull(p_price):
             if p_name not in st.session_state.master_prices:
                 st.session_state.master_prices[p_name] = int(p_price)
-                save_data()
+                if is_admin:
+                    save_data()
 
-    st.divider()
-    if not st.session_state.start_inventory_set:
-        if st.button("現在の在庫を開始時在庫として更新"):
-            st.session_state.start_inventory = st.session_state.inventory.copy()
-            st.session_state.start_inventory_set = True
-            save_data()
-            st.success("営業開始時の在庫基準を更新しました！（※これ以降は再設定できません）")
-            st.rerun()
-    else:
-        st.info("✅ 開始時在庫はすでに設定済みです（誤操作防止のためロック中）。")
-        if st.button("ロックを解除して再設定できるようにする"):
-            st.session_state.start_inventory_set = False
-            save_data()
-            st.rerun()
+    if is_admin:
+        st.divider()
+        if not st.session_state.start_inventory_set:
+            if st.button("現在の在庫を開始時在庫として更新"):
+                st.session_state.start_inventory = st.session_state.inventory.copy()
+                st.session_state.start_inventory_set = True
+                save_data()
+                st.success("営業開始時の在庫基準を更新しました！")
+                st.rerun()
+        else:
+            st.info("✅ 開始時在庫はすでに設定済みです。")
+            if st.button("ロックを解除して再設定できるようにする"):
+                st.session_state.start_inventory_set = False
+                save_data()
+                st.rerun()
 
 with tab3:
-    st.header("販売履歴（個別削除可）")
+    st.header("販売履歴")
     if not st.session_state.history.empty:
         st.metric("総売上金額", f"¥{st.session_state.history['合計金額'].sum()}")
         for i, row in st.session_state.history.iloc[::-1].iterrows():
@@ -332,15 +349,16 @@ with tab3:
             t_label = f"券#{row['整理券番号']}" if row['整理券番号'] != "なし" else "整理券なし"
             status_label = " [受け渡し済]" if row.get('受け渡し済', False) else ""
             c1.write(f"{t_label}{status_label} | {row['日時']} | {row['商品名']} | {row['数量']}個 | ¥{row['合計金額']}")
-            if c2.button("削除", key=f"del_{i}"):
-                p_name = row['商品名']
-                p_qty = row['数量']
-                if p_name in st.session_state.inventory['商品名'].values:
-                    idx = st.session_state.inventory.index[st.session_state.inventory['商品名'] == p_name][0]
-                    st.session_state.inventory.at[idx, '在庫数'] = int(st.session_state.inventory.at[idx, '在庫数']) + p_qty
-                st.session_state.history = st.session_state.history.drop(i).reset_index(drop=True)
-                save_data()
-                st.rerun()
+            if is_admin:
+                if c2.button("削除", key=f"del_{i}"):
+                    p_name = row['商品名']
+                    p_qty = row['数量']
+                    if p_name in st.session_state.inventory['商品名'].values:
+                        idx = st.session_state.inventory.index[st.session_state.inventory['商品名'] == p_name][0]
+                        st.session_state.inventory.at[idx, '在庫数'] = int(st.session_state.inventory.at[idx, '在庫数']) + p_qty
+                    st.session_state.history = st.session_state.history.drop(i).reset_index(drop=True)
+                    save_data()
+                    st.rerun()
     else:
         st.write("履歴はありません。")
 
@@ -354,8 +372,8 @@ with tab4:
                 is_all_delivered = all(ticket_rows['受け渡し済'])
                 expander_title = f"整理券番号: {t_num}" + (" ✅ 【受け渡し完了】" if is_all_delivered else " ⏳ 【未】")
                 with st.expander(expander_title):
-                    new_status = st.checkbox("受け渡しを完了にする", value=is_all_delivered, key=f"check_{t_num}")
-                    if new_status != is_all_delivered:
+                    new_status = st.checkbox("受け渡しを完了にする", value=is_all_delivered, key=f"check_{t_num}", disabled=not is_admin)
+                    if is_admin and (new_status != is_all_delivered):
                         indices = ticket_rows.index
                         st.session_state.history.loc[indices, '受け渡し済'] = new_status
                         save_data()
@@ -396,7 +414,7 @@ with tab5:
 
 with tab6:
     st.header("価格提案（強気 vs 弱気）")
-    st.write("・**強気提案価格 / 弱気提案価格**: どちらも最大5割引（元の価格の50%）を下限として制限しています。")
+    st.write("・**強気提案価格 / 弱気提案価格**: どちらも最大5割引を下限として制限しています。")
     res = []
     for _, row in inv.iterrows():
         p_name = row['商品名']
